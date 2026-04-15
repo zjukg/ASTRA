@@ -1,0 +1,27 @@
+# ASTRA: Adaptive Structured Tree Reasoning Architecture
+# Core dependencies for table-to-tree conversion and QA
+
+# LLM API
+openai>=1.0.0
+
+# Embedding models and deep learning
+sentence-transformers>=2.2.0
+torch>=2.0.0
+transformers>=4.35.0
+numpy>=1.24.0
+
+# Token counting
+tiktoken>=0.5.0
+
+# Excel and table processing
+openpyxl>=3.1.0
+pandas>=2.0.0
+
+# Demo dependencies (optional)
+fastapi>=0.104.0
+uvicorn>=0.24.0
+websockets>=12.0
+python-multipart>=0.0.6
+
+# Utility
+requests>=2.31.0
