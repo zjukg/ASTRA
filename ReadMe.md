@@ -1,6 +1,7 @@
 # ASTRA: Adaptive Structured Tree Reasoning Architecture for Complex Table Question Answering
 
 [![Paper](https://img.shields.io/badge/Paper-ACL2026-blue.svg)](https://arxiv.org/abs/2604.08999)
+[![Code](https://img.shields.io/badge/Code-GitHub-green.svg)](https://github.com/zjukg/ASTRA)
 
 
 This is the official repository for the paper: **"ASTRA: Adaptive Structured Tree Reasoning Architecture for Complex Table Question Answering"**, accepted at **ACL 2026**.
