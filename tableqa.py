@@ -464,8 +464,26 @@ def process_single_table(index, cache_manager, recorder, force_generate,
             if table2_tree_method == "rule":
                 current_tree = table2tree_rule(table, model_name_table2tree, temperature_rule, model_type_treecons)
             elif table2_tree_method == "llm_based":
-                Tree_table_v1, Tree_table_v2 = table2tree_llm(sheet, table, model_name_table2tree, temperature_rule, model_type_treecons, table2_tree_mode)
-                current_tree = Tree_table_v1
+                try:
+                    Tree_table_v1, Tree_table_v2 = table2tree_llm(sheet, table, model_name_table2tree, temperature_rule, model_type_treecons, table2_tree_mode)
+                    current_tree = Tree_table_v1
+                except Exception as e:
+                    # 如果不是已经明确指定了 code_based，尝试自动降级到 code_based (PSS) 兜底
+                    if table2_tree_mode.lower() != "code_based":
+                        print(f"⚠️  {table2_tree_mode} 模式生成失败: {e}")
+                        print(f"🔄 自动切换到 code_based (PSS) 模式进行重试...")
+                        try:
+                            Tree_table_v1, Tree_table_v2 = table2tree_llm(
+                                sheet, table, model_name_table2tree, temperature_rule, 
+                                model_type_treecons, "code_based"
+                            )
+                            current_tree = Tree_table_v1
+                            print(f"✅ code_based 模式生成完成，根节点数量: {len(current_tree)}")
+                        except Exception as fallback_error:
+                            print(f"❌ code_based 模式也失败: {fallback_error}")
+                            raise fallback_error
+                    else:
+                        raise e
             
             print(f"✅ 生成完成，根节点数量: {len(current_tree)}")
             
@@ -632,8 +650,8 @@ def build_arg_parser():
     parser.add_argument(
         "--table2-tree-mode",
         default="normal",
-        choices=["normal", "enhanced"],
-        help="Prompting mode for LLM-based tree construction.",
+        choices=["normal", "enhanced", "code_based", "adaptive"],
+        help="Prompting mode for LLM-based tree construction ('normal', 'enhanced', 'code_based', 'adaptive').",
     )
     parser.add_argument(
         "--model-name-table2tree",

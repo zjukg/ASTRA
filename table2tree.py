@@ -481,8 +481,71 @@ def excel_to_markdown_with_cell_ref(sheet):
     
     return "\n".join(markdown_lines)
 
+
+def get_cell_position(row_idx: int, col_idx: int) -> str:
+    """
+    将 0-based 的行列索引转换为 Excel 单元格位置标识符 (例如: 0,0 -> A1)
+    
+    Args:
+        row_idx: 行索引 (0-based)
+        col_idx: 列索引 (0-based)
+    
+    Returns:
+        Excel 格式的单元格位置 (如 "A1", "B2", "AA10")
+    """
+    col_letter = ''
+    c = col_idx
+    while c >= 0:
+        col_letter = chr(c % 26 + ord('A')) + col_letter
+        c = c // 26 - 1
+    
+    return f"{col_letter}{row_idx + 1}"
+
+
+def format_table_with_positions(table: List[List]) -> str:
+    """
+    将表格格式化为带单元格位置标识的字符串，供 LLM 理解表格结构
+    
+    Args:
+        table: 原始表格 (List[List] 格式)
+    
+    Returns:
+        格式化的字符串，每个单元格带有位置标识
+    
+    Example output:
+        | A1:      | B1: 2023 | C1: 2024 |
+        | A2: 收入 | B2: 100  | C2: 200  |
+    """
+    if not table or not table[0]:
+        return ""
+    
+    lines = []
+    max_col = max(len(row) for row in table)
+    
+    for row_idx, row in enumerate(table):
+        row_cells = []
+        for col_idx in range(max_col):
+            pos = get_cell_position(row_idx, col_idx)
+            if col_idx < len(row):
+                value = row[col_idx]
+                if value is None:
+                    value_str = ""
+                else:
+                    value_str = str(value)
+                if len(value_str) > 50:
+                    value_str = value_str[:47] + "..."
+            else:
+                value_str = ""
+            row_cells.append(f"{pos}: {value_str}")
+        lines.append("| " + " | ".join(row_cells) + " |")
+    
+    return "\n".join(lines)
+
+
 from prompt import HEADER_ANALYSIS_PROMPT, HIERARCHY_VALUE_IDENTIFICATION_PROMPT, FINAL_JSON_TREE_CONSTRUCTION
 from prompt import HEADER_ANALYSIS_PROMPT_ENHANCED, HIERARCHY_VALUE_IDENTIFICATION_PROMPT_ENHANCED, FINAL_JSON_TREE_CONSTRUCTION_ENHANCED
+from prompt import CODE_BASED_TREE_CONSTRUCTION_PROMPT, CODE_BASED_TREE_CONSTRUCTION_RETRY_PROMPT
+
 class llm_based_converter:
     def __init__(self, model_type, model_name, api_key="", base_url=""):
         self.model = ModelClient()
@@ -591,6 +654,141 @@ class llm_based_converter:
             full_llm_output = "".join(list(response)) 
             full_llm_output = self.extract_after_think(full_llm_output)
         return full_llm_output
+
+    def code_based_tree_construction(self, table, Normalized_headers, Hierarchy_definition, temperature, max_attempts=3):
+        """
+        使用代码生成方式构建树结构（PSS - Programmatic Structure Synthesis，适用于大型表格）
+        
+        Args:
+            table: 原始表格 (List[List])
+            Normalized_headers: 规范化表头 (JSON字符串或列表)
+            Hierarchy_definition: 层次定义 (JSON字符串或字典)
+            temperature: 温度参数
+            max_attempts: 最大重试次数
+        
+        Returns:
+            tree_result: 构建完成的树结构
+        """
+        # 解析 headers 和 hierarchy_def
+        if isinstance(Normalized_headers, str):
+            try:
+                headers_list = json.loads(Normalized_headers)
+            except json.JSONDecodeError:
+                if "```json" in Normalized_headers:
+                    headers_list = json.loads(Normalized_headers.split("```json")[1].split("```")[0].strip())
+                else:
+                    headers_list = json.loads(Normalized_headers.strip())
+        else:
+            headers_list = Normalized_headers
+        
+        if isinstance(Hierarchy_definition, str):
+            try:
+                hierarchy_def = json.loads(Hierarchy_definition)
+            except json.JSONDecodeError:
+                if "```json" in Hierarchy_definition:
+                    hierarchy_def = json.loads(Hierarchy_definition.split("```json")[1].split("```")[0].strip())
+                else:
+                    hierarchy_def = json.loads(Hierarchy_definition.strip())
+        else:
+            hierarchy_def = Hierarchy_definition
+        
+        # 格式化表格为带位置标识的形式
+        table_with_positions = format_table_with_positions(table)
+        
+        # 准备 prompt 参数
+        headers_json = json.dumps(headers_list, ensure_ascii=False, indent=2)
+        hierarchy_def_json = json.dumps(hierarchy_def, ensure_ascii=False, indent=2)
+        
+        error_history = []
+        last_code = None
+        last_error = None
+        
+        for attempt in range(max_attempts):
+            try:
+                # 构建 prompt
+                if attempt == 0:
+                    prompt = CODE_BASED_TREE_CONSTRUCTION_PROMPT.format(
+                        TABLE_WITH_POSITIONS=table_with_positions,
+                        HEADERS_JSON=headers_json,
+                        HIERARCHY_DEF_JSON=hierarchy_def_json
+                    )
+                else:
+                    prompt = CODE_BASED_TREE_CONSTRUCTION_RETRY_PROMPT.format(
+                        TABLE_WITH_POSITIONS=table_with_positions,
+                        HEADERS_JSON=headers_json,
+                        HIERARCHY_DEF_JSON=hierarchy_def_json,
+                        PREVIOUS_CODE=last_code if last_code else "无",
+                        ERROR_MESSAGE=last_error if last_error else "无"
+                    )
+                
+                if self.if_print_prompt:
+                    print(f"**Code-Based Tree Construction PROMPT (Attempt {attempt + 1})**")
+                    print(prompt[:2000] + "..." if len(prompt) > 2000 else prompt)
+                
+                # 调用 LLM
+                if self.model_type == "oai":
+                    response = self.oaimodel.generate(prompt, temperature=temperature)
+                    full_llm_output = response
+                else:
+                    response = self.model.test_generate_stream(prompt, temperature=temperature)
+                    full_llm_output = "".join(list(response))
+                    full_llm_output = self.extract_after_think(full_llm_output)
+                
+                print(f"---Code-Based Tree Construction Response (Attempt {attempt + 1})---")
+                print(full_llm_output)
+                
+                # 提取代码：优先从 <python_code> 提取，若无则尝试 ```python
+                extracted_code = None
+                match = re.search(r"<python_code>(.*?)</python_code>", full_llm_output, re.DOTALL | re.IGNORECASE)
+                if match:
+                    extracted_code = match.group(1).strip()
+                else:
+                    code_block_match = re.search(r"```python\s*(.*?)```", full_llm_output, re.DOTALL | re.IGNORECASE)
+                    if code_block_match:
+                        extracted_code = code_block_match.group(1).strip()
+                
+                if not extracted_code:
+                    last_error = "LLM 没有在 <python_code> 标签或 python 代码块中返回有效代码"
+                    last_code = full_llm_output
+                    error_history.append({"code": last_code, "error": last_error})
+                    print(f"❌ Attempt {attempt + 1}: {last_error}")
+                    continue
+                
+                # 移除注释行
+                extracted_code = "\n".join([line for line in extracted_code.splitlines() if not line.strip().startswith('#')])
+                
+                if not extracted_code.strip():
+                    last_error = "LLM 返回了空代码"
+                    last_code = ""
+                    error_history.append({"code": last_code, "error": last_error})
+                    print(f"❌ Attempt {attempt + 1}: {last_error}")
+                    continue
+                
+                last_code = extracted_code
+                
+                # 执行代码
+                tree_result = execute_tree_building_code(
+                    code=extracted_code,
+                    raw_table=table,
+                    headers=headers_list,
+                    hierarchy_def=hierarchy_def
+                )
+                
+                print(f"✅ Code-Based Tree Construction 成功 (Attempt {attempt + 1})")
+                print(f"📊 树结构根节点数量: {len(tree_result) if isinstance(tree_result, dict) else 'N/A'}")
+                
+                return tree_result
+                
+            except Exception as e:
+                last_error = str(e)
+                error_history.append({"code": last_code, "error": last_error})
+                print(f"❌ Attempt {attempt + 1} failed: {last_error}")
+                
+                if attempt == max_attempts - 1:
+                    print(f"⚠️ 所有 {max_attempts} 次尝试均失败，返回空树")
+                    return {}
+        
+        return {}
 
     def parse_json_with_merge(self, json_string):
         """
@@ -898,39 +1096,353 @@ def convert_cell_positions_to_values(data_dict, sheet, range_policy="merged_top_
 
 from openpyxl.utils import get_column_letter, range_boundaries
 
+
+def execute_tree_building_code(code: str, raw_table: List[List], headers: List[str], hierarchy_def: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    安全执行 LLM 生成的树构建代码
+    
+    Args:
+        code: LLM 生成的 Python 代码
+        raw_table: 原始表格数据 (List[List])
+        headers: 规范化表头列表
+        hierarchy_def: 层次定义字典
+    
+    Returns:
+        tree_result: 构建完成的树结构
+    
+    Raises:
+        Exception: 代码执行错误或安全违规
+    """
+    # 安全检查：检查危险关键词
+    DANGEROUS_KEYWORDS = ['import', 'exec', 'open', '__', 'os', 'sys', 'subprocess', 'eval', 'globals', 'locals', 'compile']
+    pattern = r"\b(" + "|".join(re.escape(k) for k in DANGEROUS_KEYWORDS) + r")\b"
+    
+    match = re.search(pattern, code)
+    if match:
+        keyword_found = match.group(1)
+        raise Exception(f"安全违规: 代码中发现危险关键词 '{keyword_found}'")
+    
+    # 创建安全的执行环境
+    safe_builtins = {
+        # 基本类型和转换
+        "int": int,
+        "float": float,
+        "str": str,
+        "bool": bool,
+        "list": list,
+        "dict": dict,
+        "set": set,
+        "tuple": tuple,
+        
+        # 常量
+        "None": None,
+        "True": True,
+        "False": False,
+        
+        # 迭代和范围
+        "range": range,
+        "enumerate": enumerate,
+        "zip": zip,
+        "reversed": reversed,
+        "sorted": sorted,
+        "iter": iter,
+        "next": next,
+        
+        # 长度和计数
+        "len": len,
+        "sum": sum,
+        "min": min,
+        "max": max,
+        "abs": abs,
+        "round": round,
+        
+        # 类型检查
+        "isinstance": isinstance,
+        "type": type,
+        
+        # 逻辑操作
+        "any": any,
+        "all": all,
+        
+        # 过滤和映射
+        "filter": filter,
+        "map": map,
+    }
+    
+    # 创建执行上下文，注入预定义变量
+    execution_context = {
+        "__builtins__": safe_builtins,
+        "raw_table": raw_table,
+        "headers": headers,
+        "hierarchy_def": hierarchy_def,
+    }
+    
+    try:
+        # 执行代码
+        exec(code, execution_context)
+        
+        # 检查结果变量是否存在
+        if 'tree_result' not in execution_context:
+            raise Exception("代码执行完成，但未找到 'tree_result' 变量。请确保代码将最终结果赋值给 'tree_result'。")
+        
+        return execution_context['tree_result']
+        
+    except Exception as e:
+        raise e
+
+
+def estimate_tokens(text: Any, model: str = "gpt-4o") -> int:
+    """计算/估算文本的 Token 数量"""
+    if text is None:
+        return 0
+    text_str = str(text).strip()
+    if not text_str:
+        return 0
+    try:
+        import tiktoken
+        if "gpt-4" in model.lower():
+            encoding = tiktoken.encoding_for_model("gpt-4")
+        elif "gpt-3.5" in model.lower():
+            encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        else:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text_str))
+    except Exception:
+        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text_str))
+        english_chars = len(text_str) - chinese_chars
+        return max(1, int(chinese_chars * 1.5 + english_chars * 0.25))
+
+
+def calculate_table_characteristics(
+    table: List[List], 
+    gamma: int = 50, 
+    model_name: str = "gpt-4o"
+) -> Dict[str, Any]:
+    """
+    计算表格的统计特征与文本密度指标（对应 ASTRA 论文中 AdaSTR 的特征分析）
+    
+    Args:
+        table: 原始表格（List[List]）
+        gamma: 长单元格阈值（Token数），默认 50
+        model_name: 用于计算 Token 的模型名称
+        
+    Returns:
+        包含以下统计量的字典：
+        - num_rows: 行数
+        - num_cols: 最大列数
+        - total_cells: 矩阵总单元格数 (num_rows * num_cols)
+        - non_empty_cells: 非空单元格数 n
+        - total_tokens: 估算的总 Token 数 S
+        - avg_cell_tokens: 平均非空单元格 Token 长度 s_bar (文本密度指标)
+        - long_cell_count: 超过 gamma 阈值的长单元格数量
+        - long_cell_ratio: 长单元格占比 r_long (文本密度指标)
+    """
+    if not table or not isinstance(table, list):
+        return {
+            "num_rows": 0,
+            "num_cols": 0,
+            "total_cells": 0,
+            "non_empty_cells": 0,
+            "total_tokens": 0,
+            "avg_cell_tokens": 0.0,
+            "long_cell_count": 0,
+            "long_cell_ratio": 0.0
+        }
+    
+    num_rows = len(table)
+    num_cols = max((len(r) for r in table if isinstance(r, list)), default=0)
+    total_cells = num_rows * num_cols
+    
+    non_empty_cells = 0
+    total_tokens = 0
+    long_cell_count = 0
+    
+    for row in table:
+        if not isinstance(row, list):
+            continue
+        for cell in row:
+            if cell is not None and str(cell).strip() != "":
+                cell_tokens = estimate_tokens(cell, model=model_name)
+                non_empty_cells += 1
+                total_tokens += cell_tokens
+                if cell_tokens > gamma:
+                    long_cell_count += 1
+    
+    avg_cell_tokens = (total_tokens / non_empty_cells) if non_empty_cells > 0 else 0.0
+    long_cell_ratio = (long_cell_count / non_empty_cells) if non_empty_cells > 0 else 0.0
+    
+    return {
+        "num_rows": num_rows,
+        "num_cols": num_cols,
+        "total_cells": total_cells,
+        "non_empty_cells": non_empty_cells,
+        "total_tokens": total_tokens,
+        "avg_cell_tokens": round(avg_cell_tokens, 2),
+        "long_cell_count": long_cell_count,
+        "long_cell_ratio": round(long_cell_ratio, 4)
+    }
+
+
+def select_adaptive_tree_mode(
+    table: List[List],
+    sheet: Any = None,
+    model_name: str = "gpt-4o",
+    context_limit: int = 32768,
+    alpha: float = 0.6,
+    l_sys: int = 1500,
+    reserved_gen_tokens: int = 2000,
+    mu: float = 80.0,
+    eta: float = 0.3,
+    n_high: int = 1000,
+    gamma: int = 50
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    根据表格规模与文本密度自适应选择建树模式 (DSP / SRE / PSS)
+    
+    决策规则（对应 ASTRA 论文 AdaSTR Decision Rules）：
+    1. 计算可用推理预算 B = alpha * context_limit - l_sys - reserved_gen_tokens
+    2. DSP (Direct Semantic Parsing, 即 "normal"):
+       S <= B: 估算 Token 未超过预算，使用直接 LLM 生成以获得最大语义保真度。
+    3. SRE (Symbolic Reference Encoding, 即 "enhanced"):
+       S > B 且 n <= n_high 且 (s_bar > mu 或 r_long > eta):
+       规模尚可但单元格文本密度高（富文本或长文本），使用单元格坐标引用 (A1:B2) 压缩上下文。
+       注意：若 sheet is None（无法提取 openpyxl 单元格坐标与合并关系），则退回 "code_based"。
+    4. PSS (Programmatic Structure Synthesis, 即 "code_based"):
+       S > B 且 n > n_high:
+       超大规模表格，使用代码生成 + 沙箱执行，避免生成长度截断。
+    5. Fallback:
+       若 S > B 但以上严格条件均未满足，默认走 "enhanced"（若 sheet 存在）或 "code_based"（若 sheet 为空）。
+       
+    Returns:
+        (selected_mode, stats_dict)
+    """
+    stats = calculate_table_characteristics(table, gamma=gamma, model_name=model_name)
+    S = stats["total_tokens"]
+    n = stats["non_empty_cells"]
+    s_bar = stats["avg_cell_tokens"]
+    r_long = stats["long_cell_ratio"]
+    
+    # 预算 B
+    l_safe = int(alpha * context_limit)
+    B = max(1000, l_safe - l_sys - reserved_gen_tokens)
+    stats["budget_B"] = B
+    
+    decision_reason = ""
+    selected_mode = "normal"
+    
+    # 1. DSP (Default)
+    if S <= B:
+        selected_mode = "normal"
+        decision_reason = f"Token 预算充足 (S={S} <= B={B})，采用 DSP (normal) 直接生成"
+    # 2. SRE (Density-First)
+    elif n <= n_high and (s_bar > mu or r_long > eta):
+        if sheet is not None:
+            selected_mode = "enhanced"
+            decision_reason = f"高文本密度且规模适中 (S={S} > B={B}, n={n} <= {n_high}, s_bar={s_bar} > {mu} 或 r_long={r_long:.2%} > {eta:.0%})，采用 SRE (enhanced) 坐标引用编码"
+        else:
+            selected_mode = "code_based"
+            decision_reason = f"检测到高文本密度 (S={S} > B={B}, s_bar={s_bar}, r_long={r_long:.2%})，但无 openpyxl sheet，自动转用 PSS (code_based)"
+    # 3. PSS (Scale-First)
+    elif n > n_high:
+        selected_mode = "code_based"
+        decision_reason = f"超大规模表格 (S={S} > B={B}, n={n} > n_high={n_high})，采用 PSS (code_based) 程序化结构合成"
+    # 4. Fallback Edge Case
+    else:
+        if sheet is not None:
+            selected_mode = "enhanced"
+            decision_reason = f"超预算边界样本 (S={S} > B={B})，兜底采用 SRE (enhanced)"
+        else:
+            selected_mode = "code_based"
+            decision_reason = f"超预算边界样本 (S={S} > B={B}) 且无 sheet，兜底采用 PSS (code_based)"
+            
+    stats["decision_reason"] = decision_reason
+    stats["selected_mode"] = selected_mode
+    return selected_mode, stats
+
+
 def table2tree_llm(sheet, table, model_name, temperature, model_type, table2_tree_mode):
     """
     Input :
-        sheet : 原始表格的sheet
-        table : 原始表格
+        sheet : 原始表格的sheet (可为 None)
+        table : 原始表格 (List[List] 格式)
         model_name : 模型名称
         temperature : 温度
-        model_type : 使用开源还是闭源模型
-        table2_tree_mode : 表格转树形结构模式 "normal" 或 "enhanced" enhanced用来解决 大型表格
+        model_type : 使用开源还是闭源模型 ("oai" 或 "opensource")
+        table2_tree_mode : 表格转树形结构模式
+            - "normal": 标准模式，LLM 直接生成 JSON 树 (DSP)
+            - "enhanced": 增强模式，使用单元格位置标识，适用于有合并单元格的表格 (SRE)
+            - "code_based": 代码生成模式，LLM 生成代码构建树，适用于大型表格 (PSS)
+            - "adaptive": 自适应模式，根据行列数、单元格规模与文本密度自动选择 DSP/SRE/PSS
     Output :
-        Tree_table_v1, Tree_table_v2 : 树化表格 V1 LLM直接生成， V2 LLM生成树结构之后进行脚本提取转化为树
+        Tree_table_v1, Tree_table_v2 : 树化表格
     """
-    table2tree_llm = llm_based_converter(model_type, model_name)
+    converter = llm_based_converter(model_type, model_name)
     Tree_table_v1 = None
     Tree_table_v2 = None
-    if table2_tree_mode.lower() == "normal":    
-        Normalized_headers = table2tree_llm.header_analysis_norm(table, temperature)
-        Hierarchy_definition = table2tree_llm.hierarchy_definition(table, Normalized_headers, temperature)
-        Final_json_tree = table2tree_llm.final_json_tree_construction(table, Normalized_headers, Hierarchy_definition, temperature)
-        if model_type == "oai":
-            Tree_table_v1 = table2tree_llm.parse_json_with_merge_oai(Final_json_tree)
+    
+    actual_mode = table2_tree_mode.lower()
+    if actual_mode == "adaptive":
+        selected_mode, stats = select_adaptive_tree_mode(
+            table=table, sheet=sheet, model_name=model_name
+        )
+        print(f"\n🧠 [AdaSTR 自适应建树决策] 表格规模: {stats['num_rows']}行 x {stats['num_cols']}列, "
+              f"非空单元格: {stats['non_empty_cells']}, 估算 Token: {stats['total_tokens']}/{stats['budget_B']}, "
+              f"平均单元格 Token: {stats['avg_cell_tokens']}, 长单元格比率: {stats['long_cell_ratio']:.2%}")
+        print(f"👉 决策结果: {stats['selected_mode'].upper()} | 原因: {stats['decision_reason']}")
+        actual_mode = selected_mode
+        
+    if actual_mode == "normal":
+        try:
+            Normalized_headers = converter.header_analysis_norm(table, temperature)
+            Hierarchy_definition = converter.hierarchy_definition(table, Normalized_headers, temperature)
+            Final_json_tree = converter.final_json_tree_construction(table, Normalized_headers, Hierarchy_definition, temperature)
+            if model_type == "oai":
+                Tree_table_v1 = converter.parse_json_with_merge_oai(Final_json_tree)
+            else:
+                Tree_table_v1 = converter.parse_json_with_merge(Final_json_tree)
+            Tree_table_v2 = None
+        except Exception as e:
+            if table2_tree_mode.lower() == "adaptive":
+                print(f"⚠️ normal (DSP) 模式生成失败: {e}，自动降级至 code_based (PSS) 重试...")
+                actual_mode = "code_based"
+            else:
+                raise e
+
+    if actual_mode == "enhanced":
+        if sheet is None:
+            if table2_tree_mode.lower() == "adaptive":
+                print(f"⚠️ enhanced 模式需要 sheet 对象但传入为 None，自动转用 code_based (PSS)...")
+                actual_mode = "code_based"
+            else:
+                raise ValueError("enhanced 模式需要提供 sheet 对象")
         else:
-            Tree_table_v1 = table2tree_llm.parse_json_with_merge(Final_json_tree)
-        # Tree_table_v2 = table2tree_llm.build_merged_tree(table, Normalized_headers, Hierarchy_definition)
+            try:
+                markdown_table = excel_to_markdown_with_cell_ref(sheet)
+                Normalized_headers = converter.header_analysis_norm_enhance(markdown_table, temperature)
+                Hierarchy_definition = converter.hierarchy_definition_enhance(markdown_table, Normalized_headers, temperature)
+                Final_json_tree = converter.final_json_tree_construction_enhance(markdown_table, Normalized_headers, Hierarchy_definition, temperature)
+                if model_type == "oai":
+                    Tree_table_v1 = converter.parse_json_with_merge_oai(Final_json_tree)
+                else:
+                    Tree_table_v1 = converter.parse_json_with_merge(Final_json_tree)
+                Tree_table_v1 = convert_cell_positions_to_values(Tree_table_v1, sheet)
+            except Exception as e:
+                if table2_tree_mode.lower() == "adaptive":
+                    print(f"⚠️ enhanced (SRE) 模式生成失败: {e}，自动降级至 code_based (PSS) 重试...")
+                    actual_mode = "code_based"
+                else:
+                    raise e
+                    
+    if actual_mode == "code_based":
+        print("🔧 使用 code_based (PSS) 模式：LLM 将生成代码来构建树结构")
+        Normalized_headers = converter.header_analysis_norm(table, temperature)
+        Hierarchy_definition = converter.hierarchy_definition(table, Normalized_headers, temperature)
+        Tree_table_v1 = converter.code_based_tree_construction(
+            table=table,
+            Normalized_headers=Normalized_headers,
+            Hierarchy_definition=Hierarchy_definition,
+            temperature=temperature
+        )
         Tree_table_v2 = None
-    elif table2_tree_mode.lower() == "enhanced":
-        markdown_table = excel_to_markdown_with_cell_ref(sheet)
-        Normalized_headers = table2tree_llm.header_analysis_norm_enhance(markdown_table, temperature)
-        Hierarchy_definition = table2tree_llm.hierarchy_definition_enhance(markdown_table, Normalized_headers, temperature)
-        Final_json_tree = table2tree_llm.final_json_tree_construction_enhance(markdown_table, Normalized_headers, Hierarchy_definition, temperature)
-        if model_type == "oai":
-            Tree_table_v1 = table2tree_llm.parse_json_with_merge_oai(Final_json_tree)
-        else:
-            Tree_table_v1 = table2tree_llm.parse_json_with_merge(Final_json_tree)
-        Tree_table_v1 = convert_cell_positions_to_values(Tree_table_v1, sheet)
+        
     return Tree_table_v1, Tree_table_v2

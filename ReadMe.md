@@ -135,6 +135,7 @@ python tableqa.py \
 Outputs are written to `record/`.
 
 Useful optional flags:
+- `--table2-tree-mode`: LLM-based tree construction mode: `normal` (DSP, default), `enhanced` (SRE), `code_based` (PSS), or `adaptive` (dynamically routes DSP/SRE/PSS based on table scale and text density).
 - `--force-generate`: ignore cached tree tables and regenerate them.
 - `--no-embedding`: disable embedding-assisted retrieval in `TreeQA`.
 - `--disable-quality-eval`: skip tree quality evaluation for faster runs.

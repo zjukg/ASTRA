@@ -530,3 +530,127 @@ Your output MUST be a single, valid JSON object representing the semantic tree. 
 [SEMANTIC TREE]:
 """
 
+
+# -------------------------------------------- PSS (Programmatic Structure Synthesis) 提示 -------------------------------------
+CODE_BASED_TREE_CONSTRUCTION_PROMPT = """
+You are a Python programming expert specializing in data transformation. Your task is to write a Python script that converts tabular data into a nested JSON tree structure.
+
+## Execution Environment
+
+The following variables are pre-defined and available in your execution environment:
+- `raw_table`: The original table as a Python list of lists (List[List]). Each inner list is a row.
+- `headers`: A list of normalized column headers (List[str]).
+- `hierarchy_def`: A dictionary containing the hierarchy definition with the following keys:
+  - `hierarchy_keys`: List of column headers used for grouping/nesting.
+  - `value_leaves`: List of column headers containing the final data values.
+  - `semantic_groups`: (Optional) Dictionary mapping group names to lists of value_leaf headers.
+  - `table_type`: Either "simple" or "complex".
+
+## Table with Cell Positions (for reference)
+
+Below is the table displayed with cell positions (A1, B2, etc.) for your understanding. Use this to understand the table structure, but access data via `raw_table[row_idx][col_idx]` in your code.
+
+{TABLE_WITH_POSITIONS}
+
+## Normalized Headers
+
+{HEADERS_JSON}
+
+## Hierarchy Definition
+
+{HIERARCHY_DEF_JSON}
+
+## Your Task
+
+Write Python code that:
+1. Iterates through `raw_table` (skipping header rows as needed).
+2. Uses `hierarchy_def['hierarchy_keys']` to build nested dictionary levels.
+3. At the deepest level, stores the actual values from `hierarchy_def['value_leaves']` columns.
+4. Handles merged cells (None values) by carrying forward the last non-None value for hierarchy keys.
+5. Assigns the final tree structure to a variable named `tree_result`.
+
+## Key Rules
+
+1. **Semantic Hierarchy Keys**: JSON keys for hierarchy levels must follow the format `"[Header Name] - [Cell Value]"`.
+   Example: If header is "Grade" and cell value is "1", the key should be `"Grade - 1"`.
+
+2. **Leaf Node Values**: Store actual values from `raw_table`, not position references.
+
+3. **No Data Omission**: Every data row must contribute to the tree structure.
+
+4. **Handle None/Empty Values**: For hierarchy key columns, if a cell is None or empty, use the last valid value (for merged cells).
+
+## Safety Constraints
+
+- **Forbidden**: `import`, `eval`, `exec`, `open`, `os`, `sys`, `subprocess`, `print`.
+- **Allowed**: Basic operations, loops, conditionals, and safe built-ins: `len`, `range`, `enumerate`, `str`, `int`, `float`, `list`, `dict`, `set`, `isinstance`, `any`, `all`, `zip`, `sorted`, `min`, `max`, `sum`, `abs`, `round`.
+
+## Output Format
+
+Wrap your Python code in `<python_code>` and `</python_code>` tags.
+Your code MUST assign the final tree to `tree_result`.
+
+Example structure:
+```python
+tree_result = {}
+# ... your tree-building logic ...
+tree_result = final_tree
+```
+
+## Your Python Code:
+"""
+
+CODE_BASED_TREE_CONSTRUCTION_RETRY_PROMPT = """
+You are a Python programming expert. Your previous code failed to execute. Please fix it.
+
+## Error Information
+
+**Previous Code:**
+{PREVIOUS_CODE}
+
+**Error Message:**
+{ERROR_MESSAGE}
+
+## Execution Environment (unchanged)
+
+- `raw_table`: The original table as List[List].
+- `headers`: Normalized column headers (List[str]).
+- `hierarchy_def`: Hierarchy definition dictionary.
+
+## Table with Cell Positions
+
+{TABLE_WITH_POSITIONS}
+
+## Normalized Headers
+
+{HEADERS_JSON}
+
+## Hierarchy Definition
+
+{HIERARCHY_DEF_JSON}
+
+## Fix Instructions
+
+1. Read the error message carefully.
+2. Common issues:
+   - **KeyError**: Use `.get()` for safe dictionary access.
+   - **IndexError**: Check list bounds before accessing.
+   - **TypeError**: Verify data types before operations.
+   - **Missing tree_result**: Ensure you assign to `tree_result` at the end.
+
+3. Make sure to handle:
+   - None values in hierarchy key columns (merged cells).
+   - Empty strings or missing data.
+   - Correct row indexing (skip header rows).
+
+## Safety Constraints
+
+- **Forbidden**: `import`, `eval`, `exec`, `open`, `os`, `sys`, `subprocess`, `print`.
+- **Allowed**: Basic operations, loops, conditionals, safe built-ins.
+
+## Output Format
+
+Wrap your corrected Python code in `<python_code>` and `</python_code>` tags.
+"""
+
+
