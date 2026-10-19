@@ -1213,48 +1213,69 @@ def estimate_tokens(text: Any, model: str = "gpt-4o") -> int:
         return max(1, int(chinese_chars * 1.5 + english_chars * 0.25))
 
 
+def compact_serialize_table(table: List[List]) -> str:
+    """
+    轻量紧凑序列化 tau(T)，将表格转换为去除冗余分隔符的紧凑嵌套列表格式
+    作为 minimal-token baseline 供 Tokenizer 估算 S (对应 ASTRA 论文附录 F.1)
+    """
+    if not table or not isinstance(table, list):
+        return "[]"
+    return json.dumps(table, separators=(',', ':'), ensure_ascii=False, default=str)
+
+
 def calculate_table_characteristics(
     table: List[List], 
-    gamma: int = 50, 
+    gamma: int = 80, 
     model_name: str = "gpt-4o"
 ) -> Dict[str, Any]:
     """
-    计算表格的统计特征与文本密度指标（对应 ASTRA 论文中 AdaSTR 的特征分析）
+    计算表格的统计特征与文本密度指标（严格对应 ASTRA 论文附录 F.1 公式 5-8）
     
     Args:
         table: 原始表格（List[List]）
-        gamma: 长单元格阈值（Token数），默认 50
+        gamma: 长单元格阈值（Token数），默认 80 (对应论文中 mu=80 tokens)
         model_name: 用于计算 Token 的模型名称
         
     Returns:
         包含以下统计量的字典：
-        - num_rows: 行数
-        - num_cols: 最大列数
-        - total_cells: 矩阵总单元格数 (num_rows * num_cols)
-        - non_empty_cells: 非空单元格数 n
-        - total_tokens: 估算的总 Token 数 S
-        - avg_cell_tokens: 平均非空单元格 Token 长度 s_bar (文本密度指标)
-        - long_cell_count: 超过 gamma 阈值的长单元格数量
-        - long_cell_ratio: 长单元格占比 r_long (文本密度指标)
+        - num_rows: 行数 |rows|
+        - num_cols: 最大列数 |cols|
+        - n: 表格规模指标，总单元格数 |rows| * |cols| (公式 8)
+        - total_cells: 同 n
+        - non_empty_cells_count: 非空单元格数量 |C| (公式 6, 7 分母)
+        - total_tokens_S: 紧凑序列化表格 tau(T) 的 Token 数 S = Tok(tau(T)) (公式 5)
+        - total_tokens: 同 total_tokens_S
+        - avg_cell_tokens: 平均非空单元格 Token 长度 s_bar (公式 6)
+        - long_cell_count: 超过 gamma 阈值的长单元格数量 |{c in C : Tok(c) > gamma}|
+        - long_cell_ratio: 长单元格占比 r_long (公式 7)
     """
     if not table or not isinstance(table, list):
         return {
             "num_rows": 0,
             "num_cols": 0,
+            "n": 0,
             "total_cells": 0,
-            "non_empty_cells": 0,
+            "non_empty_cells_count": 0,
+            "total_tokens_S": 0,
             "total_tokens": 0,
             "avg_cell_tokens": 0.0,
             "long_cell_count": 0,
-            "long_cell_ratio": 0.0
+            "long_cell_ratio": 0.0,
+            "compact_repr_len": 0
         }
     
     num_rows = len(table)
     num_cols = max((len(r) for r in table if isinstance(r, list)), default=0)
-    total_cells = num_rows * num_cols
+    # 论文公式 (8): n = |rows| * |cols| (表格规模 indicator)
+    n = num_rows * num_cols
     
-    non_empty_cells = 0
-    total_tokens = 0
+    # 论文公式 (5): S = Tok(tau(T))，使用去除冗余分隔符的紧凑嵌套列表格式
+    compact_repr = compact_serialize_table(table)
+    total_tokens_S = estimate_tokens(compact_repr, model=model_name)
+    
+    # 计算非空单元格集合 C 上的密度统计量: s_bar (公式 6) 和 r_long (公式 7)
+    non_empty_cells_count = 0
+    non_empty_tokens_sum = 0
     long_cell_count = 0
     
     for row in table:
@@ -1263,23 +1284,28 @@ def calculate_table_characteristics(
         for cell in row:
             if cell is not None and str(cell).strip() != "":
                 cell_tokens = estimate_tokens(cell, model=model_name)
-                non_empty_cells += 1
-                total_tokens += cell_tokens
+                non_empty_cells_count += 1
+                non_empty_tokens_sum += cell_tokens
                 if cell_tokens > gamma:
                     long_cell_count += 1
     
-    avg_cell_tokens = (total_tokens / non_empty_cells) if non_empty_cells > 0 else 0.0
-    long_cell_ratio = (long_cell_count / non_empty_cells) if non_empty_cells > 0 else 0.0
+    # 论文公式 (6): s_bar = (1 / |C|) * sum_{c in C} Tok(c)
+    avg_cell_tokens = (non_empty_tokens_sum / non_empty_cells_count) if non_empty_cells_count > 0 else 0.0
+    # 论文公式 (7): r_long = |{c in C : Tok(c) > gamma}| / |C|
+    long_cell_ratio = (long_cell_count / non_empty_cells_count) if non_empty_cells_count > 0 else 0.0
     
     return {
         "num_rows": num_rows,
         "num_cols": num_cols,
-        "total_cells": total_cells,
-        "non_empty_cells": non_empty_cells,
-        "total_tokens": total_tokens,
+        "n": n,
+        "total_cells": n,
+        "non_empty_cells_count": non_empty_cells_count,
+        "total_tokens_S": total_tokens_S,
+        "total_tokens": total_tokens_S,
         "avg_cell_tokens": round(avg_cell_tokens, 2),
         "long_cell_count": long_cell_count,
-        "long_cell_ratio": round(long_cell_ratio, 4)
+        "long_cell_ratio": round(long_cell_ratio, 4),
+        "compact_repr_len": len(compact_repr)
     }
 
 
@@ -1294,35 +1320,39 @@ def select_adaptive_tree_mode(
     mu: float = 80.0,
     eta: float = 0.3,
     n_high: int = 1000,
-    gamma: int = 50
+    gamma: int = 80
 ) -> Tuple[str, Dict[str, Any]]:
     """
     根据表格规模与文本密度自适应选择建树模式 (DSP / SRE / PSS)
+    严格遵循 ASTRA 论文附录 F.1 设定与决策规则：
     
-    决策规则（对应 ASTRA 论文 AdaSTR Decision Rules）：
-    1. 计算可用推理预算 B = alpha * context_limit - l_sys - reserved_gen_tokens
-    2. DSP (Direct Semantic Parsing, 即 "normal"):
-       S <= B: 估算 Token 未超过预算，使用直接 LLM 生成以获得最大语义保真度。
-    3. SRE (Symbolic Reference Encoding, 即 "enhanced"):
-       S > B 且 n <= n_high 且 (s_bar > mu 或 r_long > eta):
-       规模尚可但单元格文本密度高（富文本或长文本），使用单元格坐标引用 (A1:B2) 压缩上下文。
+    指标定义 (Appendix F.1):
+    - n: 表格规模指标，总单元格数 n = |rows| * |cols| (公式 8)
+    - S: 紧凑序列化表格 tau(T) 的 Token 数 S = Tok(tau(T)) (公式 5)
+    - s_bar: 平均非空单元格 Token 长度 (公式 6)
+    - r_long: 超过阈值 gamma 的长单元格占比 (公式 7)
+    - B: 可用推理预算 B = alpha * context_limit - l_sys - reserved_gen_tokens (公式 4, 默认 alpha=0.6)
+    
+    决策规则 (Decision Rules):
+    1. DSP (Direct Semantic Parsing, 即 "normal"): S <= B (公式 9)
+       Token 消耗在预算内，直接生成树，最大化语义保真度。
+    2. SRE (Symbolic Reference Encoding, 即 "enhanced"): S > B 且 n <= n_high 且 (s_bar > mu 或 r_long > eta) (公式 10)
+       超预算但规模可控 (n <= n_high)，溢出源于单元格文本密度高，使用单元格地址占位符压缩。
        注意：若 sheet is None（无法提取 openpyxl 单元格坐标与合并关系），则退回 "code_based"。
-    4. PSS (Programmatic Structure Synthesis, 即 "code_based"):
-       S > B 且 n > n_high:
-       超大规模表格，使用代码生成 + 沙箱执行，避免生成长度截断。
-    5. Fallback:
-       若 S > B 但以上严格条件均未满足，默认走 "enhanced"（若 sheet 存在）或 "code_based"（若 sheet 为空）。
-       
+    3. PSS (Programmatic Structure Synthesis, 即 "code_based"): S > B 且 n > n_high (公式 11)
+       超大规模表格 (n > n_high)，采用程序化循环代码合成树，避免逐 Token 生成截断。
+    4. Fallback (边缘情况): S > B 但以上条件未严格满足，默认退回 SRE (若有 sheet) 或 PSS (若无 sheet)。
+    
     Returns:
         (selected_mode, stats_dict)
     """
     stats = calculate_table_characteristics(table, gamma=gamma, model_name=model_name)
-    S = stats["total_tokens"]
-    n = stats["non_empty_cells"]
-    s_bar = stats["avg_cell_tokens"]
-    r_long = stats["long_cell_ratio"]
+    S = stats["total_tokens_S"]  # 公式 (5): S = Tok(tau(T))
+    n = stats["n"]               # 公式 (8): n = |rows| * |cols|
+    s_bar = stats["avg_cell_tokens"]   # 公式 (6)
+    r_long = stats["long_cell_ratio"] # 公式 (7)
     
-    # 预算 B
+    # 预算 B = L_safe - L_sys - E = alpha * L_max - L_sys - E (公式 4)
     l_safe = int(alpha * context_limit)
     B = max(1000, l_safe - l_sys - reserved_gen_tokens)
     stats["budget_B"] = B
@@ -1330,11 +1360,11 @@ def select_adaptive_tree_mode(
     decision_reason = ""
     selected_mode = "normal"
     
-    # 1. DSP (Default)
+    # 1. DSP (Default): S <= B (公式 9)
     if S <= B:
         selected_mode = "normal"
         decision_reason = f"Token 预算充足 (S={S} <= B={B})，采用 DSP (normal) 直接生成"
-    # 2. SRE (Density-First)
+    # 2. SRE (Density-First): S > B and n <= n_high and (s_bar > mu or r_long > eta) (公式 10)
     elif n <= n_high and (s_bar > mu or r_long > eta):
         if sheet is not None:
             selected_mode = "enhanced"
@@ -1342,7 +1372,7 @@ def select_adaptive_tree_mode(
         else:
             selected_mode = "code_based"
             decision_reason = f"检测到高文本密度 (S={S} > B={B}, s_bar={s_bar}, r_long={r_long:.2%})，但无 openpyxl sheet，自动转用 PSS (code_based)"
-    # 3. PSS (Scale-First)
+    # 3. PSS (Scale-First): S > B and n > n_high (公式 11)
     elif n > n_high:
         selected_mode = "code_based"
         decision_reason = f"超大规模表格 (S={S} > B={B}, n={n} > n_high={n_high})，采用 PSS (code_based) 程序化结构合成"
@@ -1385,9 +1415,10 @@ def table2tree_llm(sheet, table, model_name, temperature, model_type, table2_tre
         selected_mode, stats = select_adaptive_tree_mode(
             table=table, sheet=sheet, model_name=model_name
         )
-        print(f"\n🧠 [AdaSTR 自适应建树决策] 表格规模: {stats['num_rows']}行 x {stats['num_cols']}列, "
-              f"非空单元格: {stats['non_empty_cells']}, 估算 Token: {stats['total_tokens']}/{stats['budget_B']}, "
-              f"平均单元格 Token: {stats['avg_cell_tokens']}, 长单元格比率: {stats['long_cell_ratio']:.2%}")
+        print(f"\n🧠 [AdaSTR 自适应建树决策 - 附录 F.1 标准] 表格规模 n(|rows|*|cols|): {stats['n']} ({stats['num_rows']}行 x {stats['num_cols']}列), "
+              f"非空单元格 |C|: {stats['non_empty_cells_count']}, "
+              f"紧凑序列化 Token 开销 S=Tok(tau(T)): {stats['total_tokens_S']} (预算 B: {stats['budget_B']}), "
+              f"平均单元格 Token s_bar: {stats['avg_cell_tokens']}, 长单元格比率 r_long: {stats['long_cell_ratio']:.2%}")
         print(f"👉 决策结果: {stats['selected_mode'].upper()} | 原因: {stats['decision_reason']}")
         actual_mode = selected_mode
         
